@@ -3,6 +3,7 @@ import {
   getHealth,
   getMetrics,
   getPolicy,
+  getTraffic,
   inspect,
   type Health,
   type InspectResult,
@@ -59,6 +60,9 @@ export default function App() {
         } else if (!policy) {
           setPolicy(await getPolicy());
           setMetrics(await getMetrics());
+          // Hydrate from the gateway's ring buffer so a refresh (or traffic
+          // sent straight to the API) still shows up in the log.
+          setRecords(await getTraffic(60));
         }
       } catch {
         if (stop) return;

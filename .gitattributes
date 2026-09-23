@@ -1,0 +1,13 @@
+# Normalise line endings so the repo is identical on Windows, macOS and Linux.
+* text=auto eol=lf
+
+# Binary assets must never be touched.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.safetensors binary
+
+# Committed probe/validation output is evidence for the README's numbers;
+# collapse it in diffs so it does not drown out code review.
+backend/scripts/*_output.txt linguist-generated=true

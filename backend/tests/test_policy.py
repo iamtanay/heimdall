@@ -98,8 +98,32 @@ def test_high_confidence_injection_blocks():
     assert any("prompt_injection" in r for r in v.reasons)
 
 
-def test_jailbreak_blocks():
-    v = evaluate_firewall(guard(jailbreak=0.91, jb_conf=0.91))
+def test_jailbreak_blocks_when_corroborated():
+    v = evaluate_firewall(guard(jailbreak=0.91, jb_conf=0.91, injection=0.70))
+    assert v.verdict == BLOCKED, v.reasons
+    assert any("corroborated" in r for r in v.reasons)
+
+
+def test_uncorroborated_jailbreak_flags_instead_of_blocking():
+    """Regression: the model scored jailbreak 1.00 on "Summarise what HTTP 404
+    means in one sentence." while prompt_injection stayed at 0.33. Blocking on
+    jailbreak alone blocked 2 of 14 benign probe prompts."""
+    v = evaluate_firewall(guard(jailbreak=1.00, jb_conf=1.00, injection=0.33))
+    assert v.verdict == FLAGGED, v.reasons
+    assert v.verdict != BLOCKED
+    assert any("uncorroborated" in r for r in v.reasons)
+
+
+def test_credential_prompt_no_longer_false_blocks():
+    """The boto3-with-an-API-key case: jailbreak 0.91, prompt_injection 0.18."""
+    v = evaluate_firewall(guard(jailbreak=0.91, jb_conf=0.91, injection=0.18, sensitive=0.88))
+    assert v.verdict == FLAGGED, v.reasons
+
+
+def test_dan_style_jailbreak_still_blocks():
+    """DAN scored jailbreak 1.00 / prompt_injection 0.69 - corroborated, so it
+    must still block. A 'both must exceed 0.85' rule would have missed it."""
+    v = evaluate_firewall(guard(jailbreak=1.00, jb_conf=1.00, injection=0.69))
     assert v.verdict == BLOCKED, v.reasons
 
 

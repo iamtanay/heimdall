@@ -42,10 +42,34 @@ POLICY: Dict[str, Any] = {
         "block_threshold": 0.85,
         # noul probability at/above which any category flags for review.
         "flag_threshold": 0.55,
-        # Categories permitted to BLOCK. Deliberately only the two that
-        # describe an attack on the system rather than the content of an
-        # otherwise legitimate request.
-        "blocking_categories": ("jailbreak", "prompt_injection"),
+        # `prompt_injection` may block on its own. `jailbreak` may not: on a
+        # 21-prompt probe it scored 1.00 on two plainly benign prompts
+        # ("Summarise what HTTP 404 means in one sentence." and a boto3
+        # question containing a credential) while prompt_injection stayed at
+        # 0.33 and 0.18. Measured separation over that probe:
+        #
+        #     benign  prompt_injection   max 0.47
+        #     ATTACK  prompt_injection   min 0.69
+        #
+        # so requiring jailbreak to be corroborated by prompt_injection cleans
+        # up the false positives without losing recall:
+        #
+        #     jailbreak alone            false-blocks 2/14   missed 0/7
+        #     prompt_injection alone     false-blocks 0/14   missed 1/7
+        #     either one (naive)         false-blocks 2/14   missed 0/7
+        #     both at 0.85               false-blocks 0/14   missed 1/7  (loses DAN)
+        #     THIS RULE                  false-blocks 0/14   missed 0/7
+        #
+        # This is NOT the same as downgrading a block when sensitive_data is
+        # high - that would be trivially bypassable by pasting a fake API key
+        # into an attack. Evading this rule means suppressing prompt_injection,
+        # which is the signal that detects the attack in the first place.
+        #
+        # Fitted on 21 prompts. Re-run scripts/probe_firewall.py against your
+        # own traffic before trusting these exact numbers.
+        "decisive_category": "prompt_injection",
+        "corroborated_category": "jailbreak",
+        "corroboration_threshold": 0.55,
         # Categories that may only ever flag. See note 2 above.
         "flag_only_categories": ("sensitive_data",),
         # harm_severity is a 4-level score: 0 none, 1 minor, 2 serious, 3 severe.
@@ -210,38 +234,87 @@ def evaluate_firewall(guard_answers: Dict[str, Any]) -> FirewallVerdict:
     blocked = False
     flagged = False
 
-    # --- noul categories -------------------------------------------------
-    noul_keys = tuple(cfg["blocking_categories"]) + tuple(cfg["flag_only_categories"])
-    for key in noul_keys:
+    # --- the two threat categories ---------------------------------------
+    # prompt_injection is decisive on its own; jailbreak needs it to agree.
+    inj = _noul(guard_answers, cfg["decisive_category"])
+    jb = _noul(guard_answers, cfg["corroborated_category"])
+    inj_p = inj["p"] if inj else 0.0
+    corroborated = inj_p >= cfg["corroboration_threshold"]
+
+    sig_jb: Optional[Signal] = None
+    if jb is not None:
+        p, conf = jb["p"], jb["confidence"]
+        confidences["jailbreak"] = conf
+        sig_jb = Signal(name="jailbreak", kind="noul", value=p, confidence=conf,
+                        display=f"{p:.0%}")
+        if p >= block_at and conf < min_conf:
+            flagged = True
+            sig_jb.triggered, sig_jb.severity = True, FLAGGED
+            sig_jb.detail = f"{p:.0%} but confidence {conf:.0%} is under {min_conf:.0%}"
+            reasons.append("jailbreak: high but low confidence - flagged, not blocked")
+        elif p >= block_at and corroborated:
+            blocked = True
+            sig_jb.triggered, sig_jb.severity = True, BLOCKED
+            sig_jb.detail = (f"{p:.0%}, corroborated by prompt_injection at {inj_p:.0%}")
+            reasons.append(f"jailbreak: {p:.0%}, corroborated by prompt_injection {inj_p:.0%}")
+        elif p >= block_at:
+            # The measured failure mode: jailbreak alone is not evidence enough.
+            flagged = True
+            sig_jb.triggered, sig_jb.severity = True, FLAGGED
+            sig_jb.detail = (
+                f"{p:.0%} but prompt_injection only {inj_p:.0%}, under the "
+                f"{cfg['corroboration_threshold']:.0%} needed to corroborate"
+            )
+            reasons.append(
+                f"jailbreak: {p:.0%} uncorroborated (prompt_injection {inj_p:.0%}) "
+                "- flagged, not blocked"
+            )
+        elif p >= flag_at:
+            flagged = True
+            sig_jb.triggered, sig_jb.severity = True, FLAGGED
+            sig_jb.detail = f"{p:.0%} at or above the {flag_at:.0%} flag threshold"
+            reasons.append(f"jailbreak: {p:.0%}")
+
+    sig_inj: Optional[Signal] = None
+    if inj is not None:
+        p, conf = inj["p"], inj["confidence"]
+        confidences["prompt_injection"] = conf
+        sig_inj = Signal(name="prompt_injection", kind="noul", value=p, confidence=conf,
+                         display=f"{p:.0%}")
+        if p >= block_at:
+            if conf >= min_conf:
+                blocked = True
+                sig_inj.triggered, sig_inj.severity = True, BLOCKED
+                sig_inj.detail = f"{p:.0%} at or above the {block_at:.0%} block threshold"
+                reasons.append(f"prompt_injection: {p:.0%} (blocks at {block_at:.0%})")
+            else:
+                flagged = True
+                sig_inj.triggered, sig_inj.severity = True, FLAGGED
+                sig_inj.detail = f"{p:.0%} but confidence {conf:.0%} is under {min_conf:.0%}"
+                reasons.append("prompt_injection: high but low confidence - flagged, not blocked")
+        elif p >= flag_at:
+            flagged = True
+            sig_inj.triggered, sig_inj.severity = True, FLAGGED
+            sig_inj.detail = f"{p:.0%} at or above the {flag_at:.0%} flag threshold"
+            reasons.append(f"prompt_injection: {p:.0%}")
+
+    for s in (sig_jb, sig_inj):
+        if s is not None:
+            signals.append(s)
+
+    # --- flag-only categories ---------------------------------------------
+    for key in cfg["flag_only_categories"]:
         got = _noul(guard_answers, key)
         if got is None:
             continue
         p, conf = got["p"], got["confidence"]
         confidences[key] = conf
-        can_block = key in cfg["blocking_categories"]
-
         sig = Signal(name=key, kind="noul", value=p, confidence=conf, display=f"{p:.0%}")
-
-        if can_block and p >= block_at:
-            if conf >= min_conf:
-                blocked = True
-                sig.triggered, sig.severity = True, BLOCKED
-                sig.detail = f"{p:.0%} at or above the {block_at:.0%} block threshold"
-                reasons.append(f"{key}: {p:.0%} (blocks at {block_at:.0%})")
-            else:
-                # High probability but low confidence: flag for a human rather
-                # than auto-blocking on a shaky verdict.
-                flagged = True
-                sig.triggered, sig.severity = True, FLAGGED
-                sig.detail = f"{p:.0%} but confidence {conf:.0%} is under {min_conf:.0%}"
-                reasons.append(f"{key}: {p:.0%} at low confidence - flagged, not blocked")
-        elif p >= flag_at:
+        if p >= flag_at:
             flagged = True
             sig.triggered, sig.severity = True, FLAGGED
-            note = " (flag-only category)" if not can_block else ""
-            sig.detail = f"{p:.0%} at or above the {flag_at:.0%} flag threshold{note}"
-            reasons.append(f"{key}: {p:.0%}{note}")
-
+            sig.detail = f"{p:.0%} at or above the {flag_at:.0%} flag threshold (flag-only)"
+            reasons.append(f"{key}: {p:.0%} (flag-only category)")
         signals.append(sig)
 
     # --- harm_severity (score, not noul) ---------------------------------

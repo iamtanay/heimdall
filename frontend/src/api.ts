@@ -107,6 +107,11 @@ export const getHealth = () => get<Health>("/health");
 export const getMetrics = () => get<Metrics>("/metrics");
 export const getPolicy = () => get<PolicyConfig>("/policy");
 
+/** Recent inspections from the gateway's ring buffer, newest first. Lets the
+ *  dashboard survive a refresh instead of starting blank. */
+export const getTraffic = (limit = 50) =>
+  get<{ records: InspectResult[] }>(`/traffic?limit=${limit}`).then((r) => r.records);
+
 export async function inspect(prompt: string): Promise<InspectResult> {
   const res = await fetch(`${BASE}/inspect`, {
     method: "POST",
