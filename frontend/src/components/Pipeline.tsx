@@ -18,10 +18,13 @@ function ticksFor(name: string, kind: string, p: PolicyConfig | null) {
   const scoreSpan = 3; // both score questions have 4 levels: 0..3
 
   if (kind === "noul") {
-    if (fw.blocking_categories.includes(name)) {
+    // Both threat heads are drawn against the same thresholds. jailbreak only
+    // blocks when prompt_injection corroborates it, but the tick still marks
+    // where its own block threshold sits.
+    if (name === fw.decisive_category || name === fw.corroborated_category) {
       return { flag: fw.flag_threshold, block: fw.block_threshold };
     }
-    if (fw.flag_only_categories.includes(name)) return { flag: fw.flag_threshold };
+    if ((fw.flag_only_categories ?? []).includes(name)) return { flag: fw.flag_threshold };
     if (name === "is_sensitive") return { flag: rt.sensitive_to_frontier_at };
     if (name === "needs_tools") return { flag: rt.needs_tools_to_frontier_at };
   }

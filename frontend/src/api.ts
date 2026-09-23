@@ -67,7 +67,11 @@ export interface PolicyConfig {
   firewall: {
     block_threshold: number;
     flag_threshold: number;
-    blocking_categories: string[];
+    /** Blocks on its own. */
+    decisive_category: string;
+    /** Blocks only when the decisive category also clears corroboration. */
+    corroborated_category: string;
+    corroboration_threshold: number;
     flag_only_categories: string[];
     harm_block_level: number;
     harm_flag_level: number;
